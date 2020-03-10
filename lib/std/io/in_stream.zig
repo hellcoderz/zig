@@ -1,44 +1,31 @@
 const std = @import("../std.zig");
-const builtin = @import("builtin");
-const root = @import("root");
+const builtin = std.builtin;
 const math = std.math;
 const assert = std.debug.assert;
 const mem = std.mem;
 const Buffer = std.Buffer;
 const testing = std.testing;
 
-pub const default_stack_size = 1 * 1024 * 1024;
-pub const stack_size: usize = if (@hasDecl(root, "stack_size_std_io_InStream"))
-    root.stack_size_std_io_InStream
-else
-    default_stack_size;
-
-pub fn InStream(comptime ReadError: type) type {
+pub fn InStream(
+    comptime Context: type,
+    comptime ReadError: type,
+    /// Returns the number of bytes read. It may be less than buffer.len.
+    /// If the number of bytes read is 0, it means end of stream.
+    /// End of stream is not an error condition.
+    comptime readFn: fn (context: Context, buffer: []u8) ReadError!usize,
+) type {
     return struct {
-        const Self = @This();
         pub const Error = ReadError;
-        pub const ReadFn = if (std.io.is_async)
-            async fn (self: *Self, buffer: []u8) Error!usize
-        else
-            fn (self: *Self, buffer: []u8) Error!usize;
 
-        /// Returns the number of bytes read. It may be less than buffer.len.
-        /// If the number of bytes read is 0, it means end of stream.
-        /// End of stream is not an error condition.
-        readFn: ReadFn,
+        context: Context,
+
+        const Self = @This();
 
         /// Returns the number of bytes read. It may be less than buffer.len.
         /// If the number of bytes read is 0, it means end of stream.
         /// End of stream is not an error condition.
         pub fn read(self: *Self, buffer: []u8) Error!usize {
-            if (std.io.is_async) {
-                // Let's not be writing 0xaa in safe modes for upwards of 4 MiB for every stream read.
-                @setRuntimeSafety(false);
-                var stack_frame: [stack_size]u8 align(std.Target.stack_align) = undefined;
-                return await @asyncCall(&stack_frame, {}, self.readFn, self, buffer);
-            } else {
-                return self.readFn(self, buffer);
-            }
+            return readFn(self.context, buffer);
         }
 
         /// Deprecated: use `readAll`.

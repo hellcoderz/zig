@@ -15,54 +15,50 @@ pub const Error = error{
 pub fn render(allocator: *mem.Allocator, stream: var, tree: *ast.Tree) (@TypeOf(stream).Child.Error || Error)!bool {
     comptime assert(@typeInfo(@TypeOf(stream)) == .Pointer);
 
-    var anything_changed: bool = false;
-
     // make a passthrough stream that checks whether something changed
     const MyStream = struct {
         const MyStream = @This();
         const StreamError = @TypeOf(stream).Child.Error;
-        const Stream = std.io.OutStream(StreamError);
 
-        anything_changed_ptr: *bool,
         child_stream: @TypeOf(stream),
-        stream: Stream,
+        anything_changed: bool,
         source_index: usize,
         source: []const u8,
 
-        fn write(iface_stream: *Stream, bytes: []const u8) StreamError!usize {
-            const self = @fieldParentPtr(MyStream, "stream", iface_stream);
-
-            if (!self.anything_changed_ptr.*) {
+        fn write(self: *MyStream, bytes: []const u8) StreamError!usize {
+            if (!self.anything_changed) {
                 const end = self.source_index + bytes.len;
                 if (end > self.source.len) {
-                    self.anything_changed_ptr.* = true;
+                    self.anything_changed = true;
                 } else {
                     const src_slice = self.source[self.source_index..end];
                     self.source_index += bytes.len;
                     if (!mem.eql(u8, bytes, src_slice)) {
-                        self.anything_changed_ptr.* = true;
+                        self.anything_changed = true;
                     }
                 }
             }
 
-            return self.child_stream.writeOnce(bytes);
+            return self.child_stream.write(bytes);
         }
     };
     var my_stream = MyStream{
-        .stream = MyStream.Stream{ .writeFn = MyStream.write },
         .child_stream = stream,
-        .anything_changed_ptr = &anything_changed,
+        .anything_changed = false,
         .source_index = 0,
         .source = tree.source,
     };
+    const my_stream_stream: std.io.OutStream(*MyStream, MyStream.StreamError, MyStream.write) = .{
+        .context = &my_stream,
+    };
 
-    try renderRoot(allocator, &my_stream.stream, tree);
+    try renderRoot(allocator, &my_stream_stream, tree);
 
-    if (!anything_changed and my_stream.source_index != my_stream.source.len) {
-        anything_changed = true;
+    if (my_stream.source_index != my_stream.source.len) {
+        my_stream.anything_changed = true;
     }
 
-    return anything_changed;
+    return my_stream.anything_changed;
 }
 
 fn renderRoot(
@@ -449,9 +445,9 @@ fn renderExpression(
                     switch (op_tok_id) {
                         .Asterisk, .AsteriskAsterisk => try stream.writeByte('*'),
                         .LBracket => if (tree.tokens.at(prefix_op_node.op_token + 2).id == .Identifier)
-                            try stream.write("[*c")
+                            try stream.writeAll("[*c")
                         else
-                            try stream.write("[*"),
+                            try stream.writeAll("[*"),
                         else => unreachable,
                     }
                     if (ptr_info.sentinel) |sentinel| {
@@ -1336,7 +1332,7 @@ fn renderExpression(
 
             // TODO: Remove condition after deprecating 'typeOf'. See https://github.com/ziglang/zig/issues/1348
             if (mem.eql(u8, tree.tokenSlicePtr(tree.tokens.at(builtin_call.builtin_token)), "@typeOf")) {
-                try stream.write("@TypeOf");
+                try stream.writeAll("@TypeOf");
             } else {
                 try renderToken(tree, stream, builtin_call.builtin_token, indent, start_col, Space.None); // @name
             }
@@ -1505,9 +1501,9 @@ fn renderExpression(
                 try renderExpression(allocator, stream, tree, indent, start_col, callconv_expr, Space.None);
                 try renderToken(tree, stream, callconv_rparen, indent, start_col, Space.Space); // )
             } else if (cc_rewrite_str) |str| {
-                try stream.write("callconv(");
-                try stream.write(mem.toSliceConst(u8, str));
-                try stream.write(") ");
+                try stream.writeAll("callconv(");
+                try stream.writeAll(mem.toSliceConst(u8, str));
+                try stream.writeAll(") ");
             }
 
             switch (fn_proto.return_type) {
@@ -1997,11 +1993,11 @@ fn renderExpression(
         .AsmInput => {
             const asm_input = @fieldParentPtr(ast.Node.AsmInput, "base", base);
 
-            try stream.write("[");
+            try stream.writeAll("[");
             try renderExpression(allocator, stream, tree, indent, start_col, asm_input.symbolic_name, Space.None);
-            try stream.write("] ");
+            try stream.writeAll("] ");
             try renderExpression(allocator, stream, tree, indent, start_col, asm_input.constraint, Space.None);
-            try stream.write(" (");
+            try stream.writeAll(" (");
             try renderExpression(allocator, stream, tree, indent, start_col, asm_input.expr, Space.None);
             return renderToken(tree, stream, asm_input.lastToken(), indent, start_col, space); // )
         },
@@ -2009,18 +2005,18 @@ fn renderExpression(
         .AsmOutput => {
             const asm_output = @fieldParentPtr(ast.Node.AsmOutput, "base", base);
 
-            try stream.write("[");
+            try stream.writeAll("[");
             try renderExpression(allocator, stream, tree, indent, start_col, asm_output.symbolic_name, Space.None);
-            try stream.write("] ");
+            try stream.writeAll("] ");
             try renderExpression(allocator, stream, tree, indent, start_col, asm_output.constraint, Space.None);
-            try stream.write(" (");
+            try stream.writeAll(" (");
 
             switch (asm_output.kind) {
                 ast.Node.AsmOutput.Kind.Variable => |variable_name| {
                     try renderExpression(allocator, stream, tree, indent, start_col, &variable_name.base, Space.None);
                 },
                 ast.Node.AsmOutput.Kind.Return => |return_type| {
-                    try stream.write("-> ");
+                    try stream.writeAll("-> ");
                     try renderExpression(allocator, stream, tree, indent, start_col, return_type, Space.None);
                 },
             }
@@ -2204,7 +2200,7 @@ fn renderTokenOffset(
     }
 
     var token = tree.tokens.at(token_index);
-    try stream.write(mem.trimRight(u8, tree.tokenSlicePtr(token)[token_skip_bytes..], " "));
+    try stream.writeAll(mem.trimRight(u8, tree.tokenSlicePtr(token)[token_skip_bytes..], " "));
 
     if (space == Space.NoComment)
         return;
@@ -2214,15 +2210,15 @@ fn renderTokenOffset(
     if (space == Space.Comma) switch (next_token.id) {
         .Comma => return renderToken(tree, stream, token_index + 1, indent, start_col, Space.Newline),
         .LineComment => {
-            try stream.write(", ");
+            try stream.writeAll(", ");
             return renderToken(tree, stream, token_index + 1, indent, start_col, Space.Newline);
         },
         else => {
             if (token_index + 2 < tree.tokens.len and tree.tokens.at(token_index + 2).id == .MultilineStringLiteralLine) {
-                try stream.write(",");
+                try stream.writeAll(",");
                 return;
             } else {
-                try stream.write(",\n");
+                try stream.writeAll(",\n");
                 start_col.* = 0;
                 return;
             }
@@ -2246,7 +2242,7 @@ fn renderTokenOffset(
                 if (next_token.id == .MultilineStringLiteralLine) {
                     return;
                 } else {
-                    try stream.write("\n");
+                    try stream.writeAll("\n");
                     start_col.* = 0;
                     return;
                 }
@@ -2309,7 +2305,7 @@ fn renderTokenOffset(
                     if (next_token.id == .MultilineStringLiteralLine) {
                         return;
                     } else {
-                        try stream.write("\n");
+                        try stream.writeAll("\n");
                         start_col.* = 0;
                         return;
                     }
@@ -2327,7 +2323,7 @@ fn renderTokenOffset(
         const newline_count = if (loc.line == 1) @as(u8, 1) else @as(u8, 2);
         try stream.writeByteNTimes('\n', newline_count);
         try stream.writeByteNTimes(' ', indent);
-        try stream.write(mem.trimRight(u8, tree.tokenSlicePtr(next_token), " "));
+        try stream.writeAll(mem.trimRight(u8, tree.tokenSlicePtr(next_token), " "));
 
         offset += 1;
         token = next_token;
@@ -2338,7 +2334,7 @@ fn renderTokenOffset(
                     if (next_token.id == .MultilineStringLiteralLine) {
                         return;
                     } else {
-                        try stream.write("\n");
+                        try stream.writeAll("\n");
                         start_col.* = 0;
                         return;
                     }
@@ -2401,7 +2397,7 @@ fn renderDocComments(
             try stream.writeByteNTimes(' ', indent);
         } else {
             try renderToken(tree, stream, line_token_index.*, indent, start_col, Space.NoComment);
-            try stream.write("\n");
+            try stream.writeAll("\n");
             try stream.writeByteNTimes(' ', indent);
         }
     }
@@ -2460,7 +2456,7 @@ const FindByteOutStream = struct {
 
 fn copyFixingWhitespace(stream: var, slice: []const u8) @TypeOf(stream).Child.Error!void {
     for (slice) |byte| switch (byte) {
-        '\t' => try stream.write("    "),
+        '\t' => try stream.writeAll("    "),
         '\r' => {},
         else => try stream.writeByte(byte),
     };

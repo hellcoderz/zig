@@ -11,9 +11,6 @@ const ArrayList = std.ArrayList;
 
 usingnamespace @import("dwarf_bits.zig");
 
-pub const DwarfSeekableStream = io.SeekableStream(anyerror, anyerror);
-pub const DwarfInStream = io.InStream(anyerror);
-
 const PcRange = struct {
     start: u64,
     end: u64,
